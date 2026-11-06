@@ -14,7 +14,7 @@ openbox >/dev/null 2>&1 &
   while true; do
     chromium \
       --no-sandbox --test-type --disable-dev-shm-usage --disable-gpu \
-      --no-first-run --no-default-browser-check --password-store=basic \
+      --no-first-run --no-default-browser-check --lang=id-ID --accept-lang=id-ID,id,en-US,en --password-store=basic \
       --user-data-dir="$PROFILE" --start-maximized \
       --remote-debugging-address=127.0.0.1 --remote-debugging-port="$CDP_PORT" \
       ${CHROME_CLI} ${START_URL:-https://www.google.com} >/tmp/chromium.log 2>&1 || true

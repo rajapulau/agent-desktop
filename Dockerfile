@@ -10,13 +10,16 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       chromium xvfb x11vnc novnc python3-websockify openbox \
-      fonts-noto-core fonts-noto-color-emoji ca-certificates tini procps \
+      fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji ca-certificates tini procps \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -m -u 1000 agent \
     && mkdir -p /home/agent/profile && chown -R agent:agent /home/agent
 
 COPY start.sh /usr/local/bin/start.sh
 COPY index.html /usr/share/novnc/index.html
+# Old noVNC pages redirect to the minimal UI (browsers may have cached the vnc.html URL)
+COPY vnc-redirect.html /usr/share/novnc/vnc.html
+COPY vnc-redirect.html /usr/share/novnc/vnc_lite.html
 RUN chmod +x /usr/local/bin/start.sh
 
 USER agent
