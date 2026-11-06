@@ -17,7 +17,7 @@ openbox >/dev/null 2>&1 &
       --no-first-run --no-default-browser-check --password-store=basic \
       --user-data-dir="$PROFILE" --start-maximized \
       --remote-debugging-address=127.0.0.1 --remote-debugging-port="$CDP_PORT" \
-      ${CHROME_CLI} about:blank >/tmp/chromium.log 2>&1 || true
+      ${CHROME_CLI} ${START_URL:-https://www.google.com} >/tmp/chromium.log 2>&1 || true
     sleep 2
   done
 ) &

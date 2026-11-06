@@ -1,2 +1,145 @@
-<!doctype html><meta charset="utf-8"><title>Agent Desktop</title>
-<script>location.replace("vnc.html?autoconnect=1&resize=scale&reconnect=1&path=websockify");</script>
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Agent Desktop</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #1f1f1f; overflow: hidden;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  #screen { position: absolute; inset: 0 0 56px 0; }
+  #bar { position: absolute; left: 0; right: 0; bottom: 0; height: 56px;
+    display: flex; align-items: center; justify-content: center; gap: 10px;
+    background: #2b2b2b; border-top: 1px solid #3a3a3a; }
+  #bar button { display: flex; align-items: center; gap: 6px; height: 38px; padding: 0 14px;
+    border: 1px solid #4a4a4a; border-radius: 10px; background: #353535; color: #eee;
+    font-size: 14px; cursor: pointer; }
+  #bar button:active { background: #444; }
+  #status { position: absolute; left: 12px; width: 10px; height: 10px; border-radius: 50%; background: #c33; }
+  #status.ok { background: #3c3; }
+  /* hidden input used to raise the phone keyboard */
+  #kbd { position: absolute; left: -1000px; top: 0; width: 1px; height: 1px; opacity: 0; }
+  #modal { position: absolute; inset: 0; background: rgba(0,0,0,.55); display: none;
+    align-items: center; justify-content: center; }
+  #modal.open { display: flex; }
+  #card { width: min(92vw, 420px); background: #2b2b2b; color: #eee; border-radius: 14px; padding: 16px; }
+  #card h3 { margin: 0 0 10px; font-size: 16px; }
+  #card textarea { width: 100%; box-sizing: border-box; height: 110px; border-radius: 8px;
+    border: 1px solid #4a4a4a; background: #1f1f1f; color: #eee; padding: 8px; font-size: 14px; }
+  #card .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+  #card .row button { height: 36px; padding: 0 14px; border-radius: 8px; border: 1px solid #4a4a4a;
+    background: #353535; color: #eee; font-size: 14px; }
+  #card .row button.primary { background: #2f6fde; border-color: #2f6fde; }
+</style>
+</head>
+<body>
+<div id="screen"></div>
+
+<div id="bar">
+  <span id="status" title="connection"></span>
+  <button id="btnKbd">Keyboard</button>
+  <button id="btnPaste">Paste</button>
+  <button id="btnCopy">Copy</button>
+</div>
+
+<textarea id="kbd" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false"></textarea>
+
+<div id="modal"><div id="card">
+  <h3 id="mTitle"></h3>
+  <textarea id="mText"></textarea>
+  <div class="row">
+    <button id="mCancel">Tutup</button>
+    <button id="mOk" class="primary"></button>
+  </div>
+</div></div>
+
+<script type="module">
+import RFB from './core/rfb.js';
+import keysyms from './core/input/keysymdef.js';
+import KeyTable from './core/input/keysym.js';
+
+const $ = (id) => document.getElementById(id);
+const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/websockify';
+let rfb, serverClipboard = '';
+
+function connect() {
+  rfb = new RFB($('screen'), wsUrl, { shared: true });
+  rfb.scaleViewport = true;     // fit desktop to the window
+  rfb.resizeSession = false;
+  rfb.showDotCursor = true;
+  rfb.addEventListener('connect', () => $('status').classList.add('ok'));
+  rfb.addEventListener('disconnect', () => {
+    $('status').classList.remove('ok');
+    setTimeout(connect, 2000);  // auto-reconnect
+  });
+  rfb.addEventListener('clipboard', (e) => { serverClipboard = e.detail.text || ''; });
+}
+connect();
+
+// ---- typing helpers -------------------------------------------------------
+function typeText(text) {
+  for (const ch of text) {
+    if (ch === '\n') { rfb.sendKey(KeyTable.XK_Return, 'Enter'); continue; }
+    if (ch === '\t') { rfb.sendKey(KeyTable.XK_Tab, 'Tab'); continue; }
+    const ks = keysyms.lookup(ch.codePointAt(0));
+    if (ks) rfb.sendKey(ks, null);
+  }
+}
+const backspace = (n) => { for (let i = 0; i < n; i++) rfb.sendKey(KeyTable.XK_BackSpace, 'Backspace'); };
+
+// ---- phone keyboard: diff the hidden textarea and forward changes ---------
+const PAD = '                    '; // padding so Backspace always has something to delete
+const kbd = $('kbd');
+let last = PAD;
+const resetKbd = () => { kbd.value = PAD; last = PAD; };
+resetKbd();
+
+kbd.addEventListener('input', () => {
+  const now = kbd.value;
+  let i = 0;
+  while (i < last.length && i < now.length && last[i] === now[i]) i++;
+  backspace(last.length - i);
+  typeText(now.slice(i));
+  last = now;
+  if (now.length < 5 || now.length > 200) resetKbd();
+});
+kbd.addEventListener('keydown', (e) => {
+  const special = { Enter: KeyTable.XK_Return, Tab: KeyTable.XK_Tab, Escape: KeyTable.XK_Escape,
+    ArrowLeft: KeyTable.XK_Left, ArrowRight: KeyTable.XK_Right, ArrowUp: KeyTable.XK_Up, ArrowDown: KeyTable.XK_Down };
+  if (special[e.key]) { e.preventDefault(); rfb.sendKey(special[e.key], e.code); }
+});
+
+$('btnKbd').addEventListener('click', () => {
+  if (document.activeElement === kbd) { kbd.blur(); return; }
+  resetKbd(); kbd.focus();
+});
+
+// ---- paste / copy dialogs -------------------------------------------------
+let mode = '';
+function openModal(m) {
+  mode = m;
+  $('mTitle').textContent = m === 'paste' ? 'Paste ke desktop (diketik ke kolom yang aktif)' : 'Teks yang di-copy di desktop';
+  $('mOk').textContent = m === 'paste' ? 'Kirim' : 'Salin ke HP';
+  $('mText').value = m === 'paste' ? '' : serverClipboard;
+  $('modal').classList.add('open');
+  if (m === 'paste') $('mText').focus();
+}
+const closeModal = () => { $('modal').classList.remove('open'); $('mText').value = ''; };
+
+$('btnPaste').addEventListener('click', () => openModal('paste'));
+$('btnCopy').addEventListener('click', () => openModal('copy'));
+$('mCancel').addEventListener('click', closeModal);
+$('mOk').addEventListener('click', async () => {
+  const text = $('mText').value;
+  if (mode === 'paste') {
+    closeModal();
+    rfb.focus();
+    typeText(text);
+  } else {
+    try { await navigator.clipboard.writeText(text); } catch (_) { $('mText').select(); document.execCommand('copy'); }
+    closeModal();
+  }
+});
+</script>
+</body>
+</html>
