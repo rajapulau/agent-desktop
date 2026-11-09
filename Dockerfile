@@ -48,7 +48,7 @@ RUN curl -fsSL -o /tmp/cua.tgz \
     && cua-driver --version
 
 COPY start.sh /usr/local/bin/start.sh
-COPY gateway.js /usr/local/lib/agent-desktop/gateway.js
+COPY gateway.js control_vault.js /usr/local/lib/agent-desktop/
 COPY index.html /usr/share/novnc/index.html
 # Old noVNC pages redirect to the minimal UI (browsers may have cached the vnc.html URL)
 COPY vnc-redirect.html /usr/share/novnc/vnc.html

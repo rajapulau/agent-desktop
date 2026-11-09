@@ -36,3 +36,16 @@ Only `$PORT` (3000) is exposed; it is served by `gateway.js`:
 - 1 replica (SRE, handlify-apps!6). SSO gate on every path except `/pw/mcp` and `/cua/mcp` for requests that carry `Authorization: Bearer` (Handlify `bearer-paths` tag); the app then checks the token.
 - **No PVC, on purpose (no extra cost):** the browser profile lives in the pod, so a Metabase login is lost whenever the pod is replaced. Someone re-logs in through noVNC with the Tim Data read-only Metabase account.
 - Whoever holds an MCP token acts as whatever account is logged in to the browser. Use only read-only accounts, keep tokens only in Solocraft's `.env`, and rotate them (new values on both sides via a machine handoff).
+
+## Watching / Take control (token mode)
+
+- The noVNC page opens in **Watching** mode (view only). **Take control** gives the human mouse/keyboard; while a human holds control the gateway answers every agent `tools/call` (Playwright, cua and vault) with an error telling the agent to wait, so human and agent never fight over the browser. **Release** hands it back; it also auto-releases after `CONTROL_IDLE_SEC` (default 300) without human input.
+- Endpoints (behind the platform SSO like noVNC): `GET /control/state`, `POST /control/take|release|ping` (need header `X-Agent-Desktop: 1`). The SSO email header, when present, is recorded as the holder and logged.
+- Legacy mode has no `/control`; the page then stays fully interactive as before.
+
+## Vault (token mode)
+
+- Logins come from env/secrets, one item per prefix: `VAULT_<ITEM>_USER`, `VAULT_<ITEM>_PASSWORD`, `VAULT_<ITEM>_ORIGIN` (https origin, required; items without it are ignored). On Handlify set them as app secrets.
+- `/vault/mcp` (Bearer `PW_MCP_TOKEN`) is a small MCP server with `vault_list` (names, origin, which fields exist; never values) and `vault_fill(item, field, selector?)`. Fill types via CDP into a tab whose **current origin equals the item origin**, refuses passwords into non-password inputs and refuses while a human holds control.
+- Every MCP response leaving the gateway is scrubbed: vault values (raw and JSON-escaped) are replaced with `[vault:item.field]`, so snapshots/evaluate output never show them to the agent. Logs record item/field/origin only.
+- 2FA/captcha stay manual through Take control.

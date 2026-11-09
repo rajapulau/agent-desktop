@@ -1,6 +1,8 @@
 // Single-port gateway for agent-desktop.
 //   /pw/mcp   -> Playwright MCP  (127.0.0.1:$PLAYWRIGHT_MCP_PORT/mcp)  Bearer $PW_MCP_TOKEN required
 //   /cua/mcp  -> cua-driver MCP  (127.0.0.1:$CUA_MCP_PORT/mcp)         Bearer $CUA_MCP_TOKEN required
+//   /vault/mcp -> built-in vault MCP (vault_list, vault_fill)    Bearer $PW_MCP_TOKEN required
+//   /control/* -> Watching / Take control lock (behind the platform SSO like noVNC)
 //   /healthz  -> 200 "ok" (no auth, no data)
 //   anything else -> noVNC/websockify (127.0.0.1:$VNC_WEB_PORT), HTTP + WebSocket
 // MCP routes answer 401 without the right token (constant-time compare) and 503 when the token
@@ -9,12 +11,14 @@
 const http = require('node:http');
 const net = require('node:net');
 const crypto = require('node:crypto');
+const cv = require('./control_vault.js');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const VNC_WEB_PORT = parseInt(process.env.VNC_WEB_PORT || '6080', 10);
 const ROUTES = {
   '/pw/mcp': { port: parseInt(process.env.PLAYWRIGHT_MCP_PORT || '8931', 10), token: process.env.PW_MCP_TOKEN || '' },
   '/cua/mcp': { port: parseInt(process.env.CUA_MCP_PORT || '8932', 10), token: process.env.CUA_MCP_TOKEN || '' },
+  '/vault/mcp': { port: 0, token: process.env.PW_MCP_TOKEN || '' },
 };
 const MIN_TOKEN_LEN = 24;
 
@@ -33,7 +37,7 @@ function matchRoute(url) {
   for (const prefix of Object.keys(ROUTES)) {
     if (path === prefix || path === prefix + '/') return { prefix, ...ROUTES[prefix] };
   }
-  if (path.startsWith('/pw/') || path.startsWith('/cua/') || path === '/pw' || path === '/cua') return { prefix: null };
+  if (/^\/(pw|cua|vault)(\/|$)/.test(path)) return { prefix: null };
   return null;
 }
 
@@ -62,19 +66,43 @@ function cleanHeaders(src, extra) {
   return out;
 }
 
-function proxyHttp(req, res, port, path, extraHeaders) {
+function proxyHttp(req, res, port, path, extraHeaders, body, redactOut) {
   const headers = cleanHeaders(req.headers, extraHeaders);
+  if (body) headers['content-length'] = String(body.length);
   headers.host = `127.0.0.1:${port}`;
   // agent:false = fresh connection per request, never reuse a socket the upstream may have closed
   const up = http.request({ host: '127.0.0.1', port, method: req.method, path, headers, agent: false }, (ur) => {
     const rh = cleanHeaders(ur.headers, {});
+    // MCP POST responses are finite (one JSON or one SSE event, then end): buffer them and strip
+    // vault values. Long-lived GET SSE streams carry only notifications and are piped as-is.
+    if (redactOut && req.method === 'POST' && cv.hasRedactions()) {
+      const chunks = [];
+      ur.on('data', (c) => chunks.push(c));
+      ur.on('end', () => {
+        const out = cv.redact(Buffer.concat(chunks));
+        delete rh['content-length']; rh['content-length'] = String(out.length);
+        res.writeHead(ur.statusCode || 502, rh); res.end(out);
+      });
+      ur.on('error', () => res.destroy());
+      return;
+    }
     res.writeHead(ur.statusCode || 502, rh);
     ur.pipe(res);
   });
   up.on('error', () => { if (!res.headersSent) deny(res, 502, 'upstream unavailable'); else res.destroy(); });
   req.on('aborted', () => up.destroy());
   res.on('close', () => { if (!res.writableFinished) up.destroy(); });
-  req.pipe(up);
+  if (body) up.end(body); else req.pipe(up);
+}
+
+const MAX_MCP_BODY = 8 * 1024 * 1024;
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = []; let n = 0;
+    req.on('data', (c) => { n += c.length; if (n > MAX_MCP_BODY) { reject(new Error('too large')); req.destroy(); } else chunks.push(c); });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
 }
 
 const server = http.createServer((req, res) => {
@@ -91,9 +119,23 @@ const server = http.createServer((req, res) => {
     // Access log (no headers/tokens/bodies): time, route, method, client ip, final status
     const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
     res.on('finish', () => console.log(`${new Date().toISOString()} mcp ${r.prefix} ${req.method} ${ip} ${res.statusCode}`));
-    // Upstream origin check: present the request as same-origin local traffic.
-    return proxyHttp(req, res, r.port, '/mcp' + qs, { origin: undefined, referer: undefined });
+    if (req.method !== 'POST') {
+      if (r.prefix === '/vault/mcp') return cv.handleVaultMcp(req, res, '');
+      return proxyHttp(req, res, r.port, '/mcp' + qs, { origin: undefined, referer: undefined });
+    }
+    return readBody(req).then((body) => {
+      let msg = null; try { msg = JSON.parse(body.toString('utf8')); } catch (_) { /* let upstream answer */ }
+      // While a human holds control, agent tool calls are answered here and never reach the browser.
+      if (msg && cv.rpcIds(msg).length && cv.humanHolds()) {
+        res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+        return res.end(JSON.stringify(cv.blockedReply(msg)));
+      }
+      if (r.prefix === '/vault/mcp') return cv.handleVaultMcp(req, res, body.toString('utf8'));
+      // Upstream origin check: present the request as same-origin local traffic.
+      return proxyHttp(req, res, r.port, '/mcp' + qs, { origin: undefined, referer: undefined }, body, true);
+    }, () => deny(res, 413, 'body too large'));
   }
+  if (cv.handleControl(req, res)) return;
   proxyHttp(req, res, VNC_WEB_PORT, req.url, {});
 });
 

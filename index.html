@@ -19,6 +19,12 @@
   #bar svg { width: 22px; height: 22px; fill: none; stroke: #eee; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
   #status { position: absolute; left: 12px; width: 10px; height: 10px; border-radius: 50%; background: #c33; }
   #status.ok { background: #3c3; }
+  #ctl { display: none; width: auto !important; padding: 0 14px !important; font-weight: 600; }
+  #ctl.watch { background: #2f6fde; border-color: #2f6fde; }
+  #ctl.human { background: #c0392b; border-color: #c0392b; }
+  #ctlInfo { position: absolute; right: 12px; color: #bbb; font-size: 12px; max-width: 34vw; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  #banner { position: absolute; top: 8px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,.65);
+    color: #fff; padding: 4px 12px; border-radius: 12px; font-size: 13px; pointer-events: none; display: none; }
   /* hidden input used to raise the phone keyboard */
   #kbd { position: absolute; left: -1000px; top: 0; width: 1px; height: 1px; opacity: 0; }
   #modal { position: absolute; inset: 0; background: rgba(0,0,0,.55); display: none;
@@ -36,9 +42,12 @@
 </head>
 <body>
 <div id="screen"></div>
+<div id="banner"></div>
 
 <div id="bar">
   <span id="status" title="connection"></span>
+  <button id="ctl" title="Watching / Take control"></button>
+  <span id="ctlInfo"></span>
   <button id="btnKbd" title="Keyboard" aria-label="Keyboard"><svg viewBox="0 0 24 24"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M6 9h.01M10 9h.01M14 9h.01M18 9h.01M6 13h.01M10 13h.01M14 13h.01M18 13h.01M8 16h8"/></svg></button>
   <button id="btnPaste" title="Paste" aria-label="Paste"><svg viewBox="0 0 24 24"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/></svg></button>
   <button id="btnCopy" title="Copy" aria-label="Copy"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
@@ -69,7 +78,7 @@ function connect() {
   rfb.scaleViewport = true;     // fit desktop to the window
   rfb.resizeSession = false;
   rfb.showDotCursor = true;
-  rfb.addEventListener('connect', () => $('status').classList.add('ok'));
+  rfb.addEventListener('connect', () => { $('status').classList.add('ok'); if (typeof applyCtl === 'function') applyCtl({ holder }); });
   rfb.addEventListener('disconnect', () => {
     $('status').classList.remove('ok');
     setTimeout(connect, 2000);  // auto-reconnect
@@ -78,8 +87,49 @@ function connect() {
 }
 connect();
 
+// ---- Watching / Take control (token-mode gateway only; legacy mode has no /control and stays interactive)
+let ctlEnabled = false, holder = 'agent', iHold = false;
+async function ctlCall(path, method = 'POST') {
+  const r = await fetch(path, { method, headers: method === 'POST' ? { 'X-Agent-Desktop': '1' } : {}, cache: 'no-store' });
+  if (!r.ok) throw new Error(r.status);
+  return r.json();
+}
+function applyCtl(st) {
+  holder = st.holder;
+  if (holder !== 'human') iHold = false;
+  const interactive = !ctlEnabled || iHold;
+  if (rfb) rfb.viewOnly = !interactive;
+  const b = $('ctl');
+  b.style.display = ctlEnabled ? 'flex' : 'none';
+  b.className = iHold ? 'human' : 'watch';
+  b.textContent = iHold ? 'Release' : (holder === 'human' ? 'Take over' : 'Take control');
+  $('ctlInfo').textContent = !ctlEnabled ? '' : holder === 'human'
+    ? (iHold ? 'Anda mengendalikan · agent menunggu' : 'Dikendalikan: ' + (st.by || 'manusia'))
+    : 'Watching · agent mengendalikan';
+  const bn = $('banner');
+  bn.style.display = ctlEnabled ? 'block' : 'none';
+  bn.textContent = iHold ? 'Anda mengendalikan browser' : (holder === 'human' ? 'Manusia lain mengendalikan' : 'Watching (lihat saja)');
+}
+async function pollCtl() {
+  try { const st = await ctlCall('control/state', 'GET'); ctlEnabled = true; applyCtl(st); }
+  catch (_) { if (!ctlEnabled) applyCtl({ holder: 'agent' }); }
+}
+$('ctl').addEventListener('click', async () => {
+  try {
+    if (iHold) { iHold = false; applyCtl(await ctlCall('control/release')); }
+    else { const st = await ctlCall('control/take'); iHold = true; applyCtl(st); rfb.focus(); }
+  } catch (e) { alert('Gagal: ' + e.message); }
+});
+// heartbeat while this tab holds control and the user is active
+let active = false;
+['pointerdown', 'pointermove', 'keydown', 'wheel', 'touchstart'].forEach((ev) =>
+  $('screen').addEventListener(ev, () => { active = true; }, { capture: true, passive: true }));
+setInterval(async () => { if (iHold && active) { active = false; try { applyCtl(await ctlCall('control/ping')); } catch (_) {} } }, 20000);
+setInterval(pollCtl, 3000); pollCtl();
+
 // ---- typing helpers -------------------------------------------------------
 function typeText(text) {
+  if (rfb.viewOnly) return;
   for (const ch of text) {
     if (ch === '\n') { rfb.sendKey(KeyTable.XK_Return, 'Enter'); continue; }
     if (ch === '\t') { rfb.sendKey(KeyTable.XK_Tab, 'Tab'); continue; }
@@ -87,7 +137,7 @@ function typeText(text) {
     if (ks) rfb.sendKey(ks, null);
   }
 }
-const backspace = (n) => { for (let i = 0; i < n; i++) rfb.sendKey(KeyTable.XK_BackSpace, 'Backspace'); };
+const backspace = (n) => { if (rfb.viewOnly) return; for (let i = 0; i < n; i++) rfb.sendKey(KeyTable.XK_BackSpace, 'Backspace'); };
 
 // ---- phone keyboard: diff the hidden textarea and forward changes ---------
 const PAD = '                    '; // padding so Backspace always has something to delete

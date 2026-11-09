@@ -68,3 +68,83 @@ test('gateway', async (t) => {
     assert.strictEqual(r.headers['x-up'], '1');
   });
 });
+
+test('control lock + vault', async (t) => {
+  const calls = [];
+  const upstream = http.createServer((q, s) => { let b = ''; q.on('data', (c) => (b += c)); q.on('end', () => { calls.push(b); s.writeHead(200, { 'content-type': 'application/json' }); s.end('{"jsonrpc":"2.0","id":1,"result":{"up":true}}'); }); });
+  const upPort = await freePort(); await new Promise((r) => upstream.listen(upPort, '127.0.0.1', r));
+  const gwPort = await freePort();
+  const gw = spawn(process.execPath, [path.join(__dirname, '..', 'gateway.js')], {
+    env: { ...process.env, PORT: String(gwPort), PLAYWRIGHT_MCP_PORT: String(upPort), CUA_MCP_PORT: String(upPort), PW_MCP_TOKEN: TOKEN, CUA_MCP_TOKEN: TOKEN,
+      VNC_WEB_PORT: String(upPort), CDP_PORT: '1', CONTROL_IDLE_SEC: '2',
+      VAULT_METABASE_USER: 'u@example.com', VAULT_METABASE_PASSWORD: 'SECRETVALUE', VAULT_METABASE_ORIGIN: 'https://metabase-internal.qiscus.com/',
+      VAULT_BAD_USER: 'x', VAULT_BAD_ORIGIN: 'http://insecure.example' },
+    stdio: 'ignore',
+  });
+  t.after(() => { gw.kill(); upstream.close(); });
+  for (let i = 0; i < 50; i++) { try { await req(gwPort, { path: '/healthz' }); break; } catch { await new Promise((r) => setTimeout(r, 50)); } }
+  const auth = { authorization: 'Bearer ' + TOKEN, 'content-type': 'application/json' };
+  const call = JSON.stringify({ jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'browser_navigate', arguments: {} } });
+  const ctl = (p, h = { 'x-agent-desktop': '1' }) => req(gwPort, { method: 'POST', path: '/control/' + p, headers: h });
+
+  await t.test('agent passes while agent holds', async () => {
+    const r = await req(gwPort, { method: 'POST', path: '/pw/mcp', headers: auth }, call);
+    assert.match(r.body, /"up":true/);
+  });
+  await t.test('take requires csrf header', async () => {
+    assert.strictEqual((await ctl('take', {})).status, 403);
+  });
+  await t.test('human take blocks tools/call on pw and cua, not other methods', async () => {
+    const st = JSON.parse((await ctl('take', { 'x-agent-desktop': '1', 'x-auth-request-email': 'ganjar@qiscus.com' })).body);
+    assert.strictEqual(st.holder, 'human'); assert.strictEqual(st.by, 'ganjar@qiscus.com');
+    const n = calls.length;
+    for (const p of ['/pw/mcp', '/cua/mcp']) {
+      const r = JSON.parse((await req(gwPort, { method: 'POST', path: p, headers: auth }, call)).body);
+      assert.strictEqual(r.id, 7); assert.strictEqual(r.result.isError, true); assert.match(r.result.content[0].text, /human is controlling/);
+    }
+    assert.strictEqual(calls.length, n, 'blocked call reached upstream');
+    const l = await req(gwPort, { method: 'POST', path: '/pw/mcp', headers: auth }, JSON.stringify({ jsonrpc: '2.0', id: 8, method: 'tools/list' }));
+    assert.match(l.body, /"up":true/);
+  });
+  await t.test('release gives control back', async () => {
+    assert.strictEqual(JSON.parse((await ctl('release')).body).holder, 'agent');
+    assert.match((await req(gwPort, { method: 'POST', path: '/pw/mcp', headers: auth }, call)).body, /"up":true/);
+  });
+  await t.test('auto release after idle', async () => {
+    await ctl('take'); await new Promise((r) => setTimeout(r, 2500));
+    assert.strictEqual(JSON.parse((await req(gwPort, { path: '/control/state' })).body).holder, 'agent');
+  });
+  await t.test('vault mcp: auth, list without values, bad origin dropped', async () => {
+    assert.strictEqual((await req(gwPort, { method: 'POST', path: '/vault/mcp' }, '{}')).status, 401);
+    const init = JSON.parse((await req(gwPort, { method: 'POST', path: '/vault/mcp', headers: auth }, JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26' } }))).body);
+    assert.strictEqual(init.result.serverInfo.name, 'agent-desktop-vault');
+    const tl = JSON.parse((await req(gwPort, { method: 'POST', path: '/vault/mcp', headers: auth }, JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }))).body);
+    assert.deepStrictEqual(tl.result.tools.map((x) => x.name), ['vault_list', 'vault_fill']);
+    const raw = (await req(gwPort, { method: 'POST', path: '/vault/mcp', headers: auth }, JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'vault_list', arguments: {} } }))).body;
+    assert.ok(!raw.includes('SECRETVALUE') && !raw.includes('u@example.com'), 'vault_list leaked a value');
+    const items = JSON.parse(JSON.parse(raw).result.content[0].text).items;
+    assert.deepStrictEqual(items, [{ item: 'metabase', origin: 'https://metabase-internal.qiscus.com', user: true, password: true }]);
+    const f = JSON.parse((await req(gwPort, { method: 'POST', path: '/vault/mcp', headers: auth }, JSON.stringify({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'vault_fill', arguments: { item: 'metabase', field: 'password' } } }))).body);
+    assert.strictEqual(f.result.isError, true); assert.ok(!JSON.stringify(f).includes('SECRETVALUE'));
+  });
+});
+
+test('vault values are redacted from MCP responses', async (t) => {
+  const SECRET = 'Pw"With\\Quote77';
+  const upstream = http.createServer((q, s) => { q.resume(); q.on('end', () => {
+    s.writeHead(200, { 'content-type': 'text/event-stream' });
+    s.end('event: message\ndata: ' + JSON.stringify({ jsonrpc: '2.0', id: 1, result: { content: [{ type: 'text', text: `textbox "Password": ${SECRET} user=leakuser99 nested=${JSON.stringify(SECRET)}` }] } }) + '\n\n');
+  }); });
+  const upPort = await freePort(); await new Promise((r) => upstream.listen(upPort, '127.0.0.1', r));
+  const gwPort = await freePort();
+  const gw = spawn(process.execPath, [path.join(__dirname, '..', 'gateway.js')], {
+    env: { ...process.env, PORT: String(gwPort), PLAYWRIGHT_MCP_PORT: String(upPort), CUA_MCP_PORT: String(upPort), PW_MCP_TOKEN: TOKEN, CUA_MCP_TOKEN: TOKEN, VNC_WEB_PORT: String(upPort),
+      VAULT_M_USER: 'leakuser99', VAULT_M_PASSWORD: SECRET, VAULT_M_ORIGIN: 'https://example.com' }, stdio: 'ignore' });
+  t.after(() => { gw.kill(); upstream.close(); });
+  for (let i = 0; i < 50; i++) { try { await req(gwPort, { path: '/healthz' }); break; } catch { await new Promise((r) => setTimeout(r, 50)); } }
+  for (const p of ['/pw/mcp', '/cua/mcp']) {
+    const r = await req(gwPort, { method: 'POST', path: p, headers: { authorization: 'Bearer ' + TOKEN, 'content-type': 'application/json' } }, '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x"}}');
+    assert.ok(!r.body.includes('Quote77') && !r.body.includes('leakuser99'), `${p} leaked: ${r.body}`);
+    assert.match(r.body, /\[vault:m\.password\]/); assert.match(r.body, /\[vault:m\.user\]/);
+  }
+});
