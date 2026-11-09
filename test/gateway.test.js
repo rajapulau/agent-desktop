@@ -122,7 +122,7 @@ test('control lock + vault', async (t) => {
     assert.strictEqual(alias.result.serverInfo.name, 'agent-desktop-vault');
     assert.strictEqual((await req(gwPort, { method: 'POST', path: '/pw/mcp?server=vault' }, '{}')).status, 401);
     const tl = JSON.parse((await req(gwPort, { method: 'POST', path: '/vault/mcp', headers: auth }, JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }))).body);
-    assert.deepStrictEqual(tl.result.tools.map((x) => x.name), ['vault_list', 'vault_fill']);
+    assert.deepStrictEqual(tl.result.tools.map((x) => x.name), ['vault_list', 'vault_fill', 'vault_fill_value']);
     const raw = (await req(gwPort, { method: 'POST', path: '/vault/mcp', headers: auth }, JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'vault_list', arguments: {} } }))).body;
     assert.ok(!raw.includes('SECRETVALUE') && !raw.includes('u@example.com'), 'vault_list leaked a value');
     const items = JSON.parse(JSON.parse(raw).result.content[0].text).items;
@@ -150,4 +150,24 @@ test('vault values are redacted from MCP responses', async (t) => {
     assert.ok(!r.body.includes('Quote77') && !r.body.includes('leakuser99'), `${p} leaked: ${r.body}`);
     assert.match(r.body, /\[vault:m\.password\]/); assert.match(r.body, /\[vault:m\.user\]/);
   }
+});
+
+test('vault_fill_value: client-held secret gets redacted from later responses', async (t) => {
+  const SECRET = 'ClientHeldPw#91';
+  const upstream = http.createServer((q, s) => { q.resume(); q.on('end', () => { s.writeHead(200, { 'content-type': 'application/json' }); s.end(JSON.stringify({ jsonrpc: '2.0', id: 1, result: { content: [{ type: 'text', text: 'value=' + SECRET } ] } })); }); });
+  const upPort = await freePort(); await new Promise((r) => upstream.listen(upPort, '127.0.0.1', r));
+  const gwPort = await freePort();
+  const gw = spawn(process.execPath, [path.join(__dirname, '..', 'gateway.js')], {
+    env: { ...process.env, PORT: String(gwPort), PLAYWRIGHT_MCP_PORT: String(upPort), CUA_MCP_PORT: String(upPort), PW_MCP_TOKEN: TOKEN, CUA_MCP_TOKEN: TOKEN, VNC_WEB_PORT: String(upPort), CDP_PORT: '1' }, stdio: 'ignore' });
+  t.after(() => { gw.kill(); upstream.close(); });
+  for (let i = 0; i < 50; i++) { try { await req(gwPort, { path: '/healthz' }); break; } catch { await new Promise((r) => setTimeout(r, 50)); } }
+  const auth = { authorization: 'Bearer ' + TOKEN, 'content-type': 'application/json' };
+  const before = await req(gwPort, { method: 'POST', path: '/pw/mcp', headers: auth }, '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x"}}');
+  assert.ok(before.body.includes(SECRET));
+  const bad = JSON.parse((await req(gwPort, { method: 'POST', path: '/pw/mcp?server=vault', headers: auth }, JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'vault_fill_value', arguments: { item: 'sa', field: 'password', origin: 'http://x.example', value: SECRET } } }))).body);
+  assert.strictEqual(bad.result.isError, true);
+  const f = (await req(gwPort, { method: 'POST', path: '/pw/mcp?server=vault', headers: auth }, JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'vault_fill_value', arguments: { item: 'sa', field: 'password', origin: 'https://superadmin.qiscus.com/superadmin', value: SECRET } } }))).body;
+  assert.ok(!f.includes(SECRET));
+  const after = await req(gwPort, { method: 'POST', path: '/pw/mcp', headers: auth }, '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x"}}');
+  assert.ok(!after.body.includes(SECRET), after.body); assert.match(after.body, /\[vault:sa\.password\]/);
 });

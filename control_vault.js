@@ -135,8 +135,8 @@ const FILL_FN = `function (field, selector, value) {
   return { ok: true, field: el.name || el.id || el.type };
 }`;
 
-async function vaultFill(item, field, selector) {
-  const it = VAULT[item];
+async function vaultFill(item, field, selector, inline) {
+  const it = inline || VAULT[item];
   if (!it) return { ok: false, error: `unknown vault item '${item}'` };
   if (!['user', 'password'].includes(field)) return { ok: false, error: "field must be 'user' or 'password'" };
   if (!it[field]) return { ok: false, error: `vault item '${item}' has no ${field}` };
@@ -171,12 +171,30 @@ const VAULT_TOOLS = [
       field: { type: 'string', enum: ['user', 'password'] },
       selector: { type: 'string', description: 'Optional CSS selector of the input; default auto-detect' } },
     required: ['item', 'field'], additionalProperties: false } },
+  { name: 'vault_fill_value', description: 'For MCP clients that keep the secret themselves (e.g. a bot bridge): same as vault_fill, ' +
+      'but with origin and value supplied in the call. The value is redacted from every later MCP response. Not for direct LLM use.',
+    inputSchema: { type: 'object', properties: { item: { type: 'string' }, field: { type: 'string', enum: ['user', 'password'] },
+      origin: { type: 'string' }, value: { type: 'string' }, selector: { type: 'string' } },
+    required: ['item', 'field', 'origin', 'value'], additionalProperties: false } },
 ];
 
 async function vaultCall(name, args) {
   if (name === 'vault_list') {
     const items = Object.entries(VAULT).map(([n, it]) => ({ item: n, origin: it.origin, user: !!it.user, password: !!it.password }));
     return { content: [{ type: 'text', text: JSON.stringify({ items }) }] };
+  }
+  if (name === 'vault_fill_value') {
+    // The client keeps the secret (e.g. Solocraft's .env) and sends it only for this fill.
+    const item = String(args.item || '').toLowerCase().replace(/[^a-z0-9_]/g, '');
+    const field = String(args.field || '');
+    let origin;
+    try { const u = new URL(String(args.origin || '')); if (u.protocol !== 'https:') throw 0; origin = u.origin; }
+    catch { return { isError: true, content: [{ type: 'text', text: 'origin must be an https URL' }] }; }
+    const value = typeof args.value === 'string' ? args.value : '';
+    if (!item || !value) return { isError: true, content: [{ type: 'text', text: 'item and value are required' }] };
+    addRedaction(item, field, value);
+    const r = await vaultFill(item, field, args.selector ? String(args.selector) : '', { origin, [field]: value });
+    return { isError: !r.ok, content: [{ type: 'text', text: r.ok ? `filled ${field} for ${item} (value hidden)` : r.error }] };
   }
   if (name === 'vault_fill') {
     const r = await vaultFill(String(args.item || '').toLowerCase(), String(args.field || ''), args.selector ? String(args.selector) : '');
@@ -219,6 +237,16 @@ for (const [name, it] of Object.entries(VAULT)) {
   }
 }
 REDACT.sort((a, b) => b[0].length - a[0].length);
+// Values handed in by a client at fill time are added for the rest of the pod's life.
+function addRedaction(name, field, v) {
+  if (!v || v.length < 4) return;
+  const forms = new Set([v, JSON.stringify(v).slice(1, -1), JSON.stringify(JSON.stringify(v).slice(1, -1)).slice(1, -1)]);
+  for (const x of forms) {
+    const nb = Buffer.from(x, 'utf8');
+    if (!REDACT.some(([b]) => b.equals(nb))) REDACT.push([nb, Buffer.from(`[vault:${name}.${field}]`, 'utf8')]);
+  }
+  REDACT.sort((a, b) => b[0].length - a[0].length);
+}
 function redact(buf) {
   if (!REDACT.length) return buf;
   for (const [needle, repl] of REDACT) {
