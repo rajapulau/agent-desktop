@@ -171,3 +171,30 @@ test('vault_fill_value: client-held secret gets redacted from later responses', 
   const after = await req(gwPort, { method: 'POST', path: '/pw/mcp', headers: auth }, '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x"}}');
   assert.ok(!after.body.includes(SECRET), after.body); assert.match(after.body, /\[vault:sa\.password\]/);
 });
+
+test('vault_fill_value with VAULT_PRIVATE_KEY: only sealed values, origin/field bound inside the seal', async (t) => {
+  const crypto = require('node:crypto');
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 3072 });
+  const seal = (o) => 'enc:v1:' + crypto.publicEncrypt({ key: publicKey, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256' }, Buffer.from(JSON.stringify(o))).toString('base64');
+  const SECRET = 'SealedPw-77xx';
+  const upstream = http.createServer((q, s) => { q.resume(); q.on('end', () => { s.writeHead(200, { 'content-type': 'application/json' }); s.end(JSON.stringify({ jsonrpc: '2.0', id: 1, result: { content: [{ type: 'text', text: 'v=' + SECRET }] } })); }); });
+  const upPort = await freePort(); await new Promise((r) => upstream.listen(upPort, '127.0.0.1', r));
+  const gwPort = await freePort();
+  const gw = spawn(process.execPath, [path.join(__dirname, '..', 'gateway.js')], {
+    env: { ...process.env, PORT: String(gwPort), PLAYWRIGHT_MCP_PORT: String(upPort), CUA_MCP_PORT: String(upPort), PW_MCP_TOKEN: TOKEN, CUA_MCP_TOKEN: TOKEN, VNC_WEB_PORT: String(upPort), CDP_PORT: '1',
+      VAULT_PRIVATE_KEY: privateKey.export({ format: 'der', type: 'pkcs8' }).toString('base64') }, stdio: 'ignore' });
+  t.after(() => { gw.kill(); upstream.close(); });
+  for (let i = 0; i < 50; i++) { try { await req(gwPort, { path: '/healthz' }); break; } catch { await new Promise((r) => setTimeout(r, 50)); } }
+  const auth = { authorization: 'Bearer ' + TOKEN, 'content-type': 'application/json' };
+  const fill = async (a) => JSON.parse((await req(gwPort, { method: 'POST', path: '/pw/mcp?server=vault', headers: auth }, JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'vault_fill_value', arguments: a } }))).body).result;
+  let r = await fill({ item: 'sa', field: 'password', origin: 'https://example.com', value: SECRET });
+  assert.match(r.content[0].text, /only accepts encrypted/);
+  r = await fill({ item: 'sa', field: 'user', value_enc: seal({ o: 'https://example.com', f: 'password', v: SECRET }) });
+  assert.match(r.content[0].text, /field does not match/);
+  r = await fill({ item: 'sa', field: 'password', value_enc: 'enc:v1:AAAA' });
+  assert.match(r.content[0].text, /cannot decrypt/);
+  r = await fill({ item: 'sa', field: 'password', origin: 'https://evil.example', value_enc: seal({ o: 'https://example.com', f: 'password', v: SECRET }) });
+  assert.match(r.content[0].text, /browser not reachable/); // decrypted and passed checks; origin comes from the seal
+  const after = await req(gwPort, { method: 'POST', path: '/pw/mcp', headers: auth }, '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x"}}');
+  assert.ok(!after.body.includes(SECRET)); assert.match(after.body, /\[vault:sa\.password\]/);
+});

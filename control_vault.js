@@ -75,6 +75,18 @@ function blockedReply(msg) {
 }
 
 // ---------------------------------------------------------------- vault
+const crypto = require('node:crypto');
+let PRIV = null;
+if (process.env.VAULT_PRIVATE_KEY) {
+  try { PRIV = crypto.createPrivateKey({ key: Buffer.from(process.env.VAULT_PRIVATE_KEY.trim(), 'base64'), format: 'der', type: 'pkcs8' }); }
+  catch { console.log('VAULT_PRIVATE_KEY invalid: encrypted vault values disabled'); PRIV = false; }
+}
+function unseal(s) {
+  const m = /^enc:v1:([A-Za-z0-9+/=]+)$/.exec(String(s).trim());
+  if (!m || !PRIV) throw new Error('bad');
+  const pt = crypto.privateDecrypt({ key: PRIV, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256' }, Buffer.from(m[1], 'base64'));
+  return JSON.parse(pt.toString('utf8'));
+}
 function loadVault(env) {
   const items = {};
   for (const [k, v] of Object.entries(env)) {
@@ -174,8 +186,8 @@ const VAULT_TOOLS = [
   { name: 'vault_fill_value', description: 'For MCP clients that keep the secret themselves (e.g. a bot bridge): same as vault_fill, ' +
       'but with origin and value supplied in the call. The value is redacted from every later MCP response. Not for direct LLM use.',
     inputSchema: { type: 'object', properties: { item: { type: 'string' }, field: { type: 'string', enum: ['user', 'password'] },
-      origin: { type: 'string' }, value: { type: 'string' }, selector: { type: 'string' } },
-    required: ['item', 'field', 'origin', 'value'], additionalProperties: false } },
+      origin: { type: 'string' }, value: { type: 'string' }, value_enc: { type: 'string' }, selector: { type: 'string' } },
+    required: ['item', 'field'], additionalProperties: false } },
 ];
 
 async function vaultCall(name, args) {
@@ -185,12 +197,21 @@ async function vaultCall(name, args) {
   }
   if (name === 'vault_fill_value') {
     // The client keeps the secret (e.g. Solocraft's .env) and sends it only for this fill.
+    // With VAULT_PRIVATE_KEY set, only sealed values are accepted: value_enc = "enc:v1:" + base64(RSA-OAEP-SHA256(
+    // JSON {o: origin, f: field, v: value})). Origin and field come from inside the seal, so a stolen
+    // ciphertext cannot be typed into another site or field.
     const item = String(args.item || '').toLowerCase().replace(/[^a-z0-9_]/g, '');
-    const field = String(args.field || '');
-    let origin;
+    let field = String(args.field || '');
+    let origin, value = '';
+    if (PRIV !== null) {
+      if (typeof args.value_enc !== 'string') return { isError: true, content: [{ type: 'text', text: 'this desktop only accepts encrypted vault values (value_enc)' }] };
+      let sealed;
+      try { sealed = unseal(args.value_enc); } catch { return { isError: true, content: [{ type: 'text', text: 'cannot decrypt vault value (wrong key?)' }] }; }
+      if (sealed.f !== field) return { isError: true, content: [{ type: 'text', text: 'sealed field does not match' }] };
+      args = { ...args, origin: sealed.o }; value = String(sealed.v || '');
+    } else value = typeof args.value === 'string' ? args.value : '';
     try { const u = new URL(String(args.origin || '')); if (u.protocol !== 'https:') throw 0; origin = u.origin; }
     catch { return { isError: true, content: [{ type: 'text', text: 'origin must be an https URL' }] }; }
-    const value = typeof args.value === 'string' ? args.value : '';
     if (!item || !value) return { isError: true, content: [{ type: 'text', text: 'item and value are required' }] };
     addRedaction(item, field, value);
     const r = await vaultFill(item, field, args.selector ? String(args.selector) : '', { origin, [field]: value });
