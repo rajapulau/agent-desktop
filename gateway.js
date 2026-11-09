@@ -44,18 +44,36 @@ function deny(res, code, msg) {
   res.end(JSON.stringify({ error: msg }));
 }
 
+// Hop-by-hop headers must not be forwarded (RFC 9110 7.6.1). Forwarding e.g. "Connection: close"
+// from a front proxy breaks the upstream socket and yields alternating empty 400s.
+const HOP = new Set(['connection', 'keep-alive', 'proxy-connection', 'transfer-encoding', 'upgrade',
+  'te', 'trailer', 'proxy-authorization', 'proxy-authenticate', 'authorization', 'host']);
+function cleanHeaders(src, extra) {
+  const listed = String(src.connection || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+  const out = {};
+  for (const [k, v] of Object.entries(src)) {
+    const lk = k.toLowerCase();
+    if (HOP.has(lk) || listed.includes(lk) || v === undefined) continue;
+    out[k] = v;
+  }
+  for (const [k, v] of Object.entries(extra || {})) {
+    if (v === undefined) delete out[k]; else out[k] = v;
+  }
+  return out;
+}
+
 function proxyHttp(req, res, port, path, extraHeaders) {
-  const headers = { ...req.headers, ...extraHeaders };
-  delete headers['authorization'];
-  for (const k of Object.keys(headers)) if (headers[k] === undefined) delete headers[k];
+  const headers = cleanHeaders(req.headers, extraHeaders);
   headers.host = `127.0.0.1:${port}`;
-  const up = http.request({ host: '127.0.0.1', port, method: req.method, path, headers }, (ur) => {
-    res.writeHead(ur.statusCode || 502, ur.headers);
+  // agent:false = fresh connection per request, never reuse a socket the upstream may have closed
+  const up = http.request({ host: '127.0.0.1', port, method: req.method, path, headers, agent: false }, (ur) => {
+    const rh = cleanHeaders(ur.headers, {});
+    res.writeHead(ur.statusCode || 502, rh);
     ur.pipe(res);
   });
   up.on('error', () => { if (!res.headersSent) deny(res, 502, 'upstream unavailable'); else res.destroy(); });
   req.on('aborted', () => up.destroy());
-  res.on('close', () => up.destroy());
+  res.on('close', () => { if (!res.writableFinished) up.destroy(); });
   req.pipe(up);
 }
 
