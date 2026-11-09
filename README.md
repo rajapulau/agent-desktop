@@ -46,6 +46,6 @@ Only `$PORT` (3000) is exposed; it is served by `gateway.js`:
 ## Vault (token mode)
 
 - Logins come from env/secrets, one item per prefix: `VAULT_<ITEM>_USER`, `VAULT_<ITEM>_PASSWORD`, `VAULT_<ITEM>_ORIGIN` (https origin, required; items without it are ignored). On Handlify set them as app secrets.
-- `/vault/mcp` (Bearer `PW_MCP_TOKEN`) is a small MCP server with `vault_list` (names, origin, which fields exist; never values) and `vault_fill(item, field, selector?)`. Fill types via CDP into a tab whose **current origin equals the item origin**, refuses passwords into non-password inputs and refuses while a human holds control.
+- `/vault/mcp`, also reachable as `/pw/mcp?server=vault` for ingresses that only bypass SSO on exact MCP paths (Bearer `PW_MCP_TOKEN`), is a small MCP server with `vault_list` (names, origin, which fields exist; never values) and `vault_fill(item, field, selector?)`. Fill types via CDP into a tab whose **current origin equals the item origin**, refuses passwords into non-password inputs and refuses while a human holds control.
 - Every MCP response leaving the gateway is scrubbed: vault values (raw and JSON-escaped) are replaced with `[vault:item.field]`, so snapshots/evaluate output never show them to the agent. Logs record item/field/origin only.
 - 2FA/captcha stay manual through Take control.

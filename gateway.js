@@ -1,7 +1,7 @@
 // Single-port gateway for agent-desktop.
 //   /pw/mcp   -> Playwright MCP  (127.0.0.1:$PLAYWRIGHT_MCP_PORT/mcp)  Bearer $PW_MCP_TOKEN required
 //   /cua/mcp  -> cua-driver MCP  (127.0.0.1:$CUA_MCP_PORT/mcp)         Bearer $CUA_MCP_TOKEN required
-//   /vault/mcp -> built-in vault MCP (vault_list, vault_fill)    Bearer $PW_MCP_TOKEN required
+//   /vault/mcp (alias /pw/mcp?server=vault) -> built-in vault MCP  Bearer $PW_MCP_TOKEN required
 //   /control/* -> Watching / Take control lock (behind the platform SSO like noVNC)
 //   /healthz  -> 200 "ok" (no auth, no data)
 //   anything else -> noVNC/websockify (127.0.0.1:$VNC_WEB_PORT), HTTP + WebSocket
@@ -116,6 +116,9 @@ const server = http.createServer((req, res) => {
       return deny(res, 401, 'unauthorized');
     }
     const qs = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
+    // /pw/mcp?server=vault reaches the vault MCP with the Playwright token. Ingresses that only
+    // let exact MCP paths bypass SSO (Handlify bearer-paths) need no extra path for it.
+    if (r.prefix === '/pw/mcp' && new URLSearchParams(qs.slice(1)).get('server') === 'vault') r.prefix = '/vault/mcp';
     // Access log (no headers/tokens/bodies): time, route, method, client ip, final status
     const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
     res.on('finish', () => console.log(`${new Date().toISOString()} mcp ${r.prefix} ${req.method} ${ip} ${res.statusCode}`));

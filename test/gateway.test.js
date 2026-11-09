@@ -118,6 +118,9 @@ test('control lock + vault', async (t) => {
     assert.strictEqual((await req(gwPort, { method: 'POST', path: '/vault/mcp' }, '{}')).status, 401);
     const init = JSON.parse((await req(gwPort, { method: 'POST', path: '/vault/mcp', headers: auth }, JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26' } }))).body);
     assert.strictEqual(init.result.serverInfo.name, 'agent-desktop-vault');
+    const alias = JSON.parse((await req(gwPort, { method: 'POST', path: '/pw/mcp?server=vault', headers: auth }, JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }))).body);
+    assert.strictEqual(alias.result.serverInfo.name, 'agent-desktop-vault');
+    assert.strictEqual((await req(gwPort, { method: 'POST', path: '/pw/mcp?server=vault' }, '{}')).status, 401);
     const tl = JSON.parse((await req(gwPort, { method: 'POST', path: '/vault/mcp', headers: auth }, JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }))).body);
     assert.deepStrictEqual(tl.result.tools.map((x) => x.name), ['vault_list', 'vault_fill']);
     const raw = (await req(gwPort, { method: 'POST', path: '/vault/mcp', headers: auth }, JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'vault_list', arguments: {} } }))).body;
