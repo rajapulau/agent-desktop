@@ -60,7 +60,8 @@ WORKDIR /home/agent
 RUN cua-driver telemetry disable || true
 
 VOLUME /home/agent/profile
-EXPOSE 3000
+# token mode publishes only 3000; legacy mode (no tokens) also uses 8931/8932
+EXPOSE 3000 8931 8932
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["/usr/local/bin/start.sh"]
