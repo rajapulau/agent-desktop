@@ -83,8 +83,14 @@ const server = http.createServer((req, res) => {
   if (r) {
     if (!r.prefix) return deny(res, 404, 'not found');
     if (!r.token) return deny(res, 503, 'mcp disabled: token not configured');
-    if (!tokenOk(req.headers['authorization'], r.token)) return deny(res, 401, 'unauthorized');
+    if (!tokenOk(req.headers['authorization'], r.token)) {
+      console.log(`${new Date().toISOString()} mcp ${r.prefix} ${req.method} ${String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim()} 401`);
+      return deny(res, 401, 'unauthorized');
+    }
     const qs = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
+    // Access log (no headers/tokens/bodies): time, route, method, client ip, final status
+    const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
+    res.on('finish', () => console.log(`${new Date().toISOString()} mcp ${r.prefix} ${req.method} ${ip} ${res.statusCode}`));
     // Upstream origin check: present the request as same-origin local traffic.
     return proxyHttp(req, res, r.port, '/mcp' + qs, { origin: undefined, referer: undefined });
   }
